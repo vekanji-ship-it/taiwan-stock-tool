@@ -241,22 +241,34 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def process_institutional(chip_df: pd.DataFrame) -> pd.DataFrame:
-    """整理三大法人淨買賣"""
+    """整理三大法人淨買賣（FinMind name 欄位為英文）"""
     if chip_df.empty:
         return pd.DataFrame()
     try:
         df = chip_df.copy()
-        df["net"] = pd.to_numeric(df["buy"], errors="coerce") - pd.to_numeric(df["sell"], errors="coerce")
-        pivot = df.pivot_table(index="date", columns="name", values="net", aggfunc="sum")
+        df["buy"]  = pd.to_numeric(df["buy"],  errors="coerce").fillna(0)
+        df["sell"] = pd.to_numeric(df["sell"], errors="coerce").fillna(0)
+        df["net"]  = df["buy"] - df["sell"]
+
+        # FinMind 實際 name 值對應表
+        # Foreign_Investor / Foreign_Dealer_Self → 外資
+        # Investment_Trust → 投信
+        # Dealer / Dealer_Self / Dealer_Hedging → 自營商
+        name_map = {
+            "Foreign_Investor":    "外資",
+            "Foreign_Dealer_Self": "外資",
+            "Investment_Trust":    "投信",
+            "Dealer":              "自營商",
+            "Dealer_Self":         "自營商",
+            "Dealer_Hedging":      "自營商",
+        }
+        df["group"] = df["name"].map(name_map)
+        df = df.dropna(subset=["group"])
+
+        pivot = df.groupby(["date", "group"])["net"].sum().unstack(fill_value=0)
         pivot.columns.name = None
         pivot = pivot.reset_index()
-        # 標準化欄位名稱
-        rename = {}
-        for c in pivot.columns:
-            if "外資" in str(c):   rename[c] = "外資"
-            elif "投信" in str(c): rename[c] = "投信"
-            elif "自營" in str(c): rename[c] = "自營商"
-        pivot.rename(columns=rename, inplace=True)
+
         for col in ["外資", "投信", "自營商"]:
             if col not in pivot.columns:
                 pivot[col] = 0
@@ -264,6 +276,26 @@ def process_institutional(chip_df: pd.DataFrame) -> pd.DataFrame:
         return pivot.sort_values("date")
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=86400)
+def fetch_stock_name(stock_id: str) -> str:
+    """從 FinMind 抓股票中文名稱（快取 24 小時）"""
+    try:
+        params = {
+            "dataset": "TaiwanStockInfo",
+            "token": FINMIND_TOKEN,
+        }
+        r = requests.get(FINMIND_BASE, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("status") == 200 and data.get("data"):
+            for item in data["data"]:
+                if str(item.get("stock_id", "")) == str(stock_id):
+                    return item.get("stock_name", stock_id)
+    except Exception:
+        pass
+    return stock_id
 
 # ─── 訊號判斷 ────────────────────────────────────────────────────────────────
 
@@ -541,7 +573,8 @@ def main():
     signals   = generate_signals(df, chip_proc)
     
     # ── 股名與即時報價 ──
-    stock_name = rt.get("name", stock_id) if rt.get("ok") else stock_id
+    rt_name    = rt.get("name", "") if rt.get("ok") else ""
+    stock_name = rt_name if (rt_name and rt_name != stock_id) else fetch_stock_name(stock_id)
     last_close = df["Close"].iloc[-1]
     prev_close = df["Close"].iloc[-2] if len(df) > 1 else last_close
     chg        = last_close - prev_close

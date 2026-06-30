@@ -735,7 +735,7 @@ def main():
         st.markdown(metric_card("成交量",f"{vol/1000:.0f}K",f"均量 {ratio:.1f}x",vc),unsafe_allow_html=True)
 
     # 分頁
-    t1,t2,t3,t4 = st.tabs(["📈 技術分析","📊 基本面","🔀 多股比較","🏆 排行榜"])
+    t1,t2,t3,t4,t5 = st.tabs(["📈 技術分析","📊 基本面","🔀 多股比較","🏆 排行榜","💰 ETF分析"])
 
     # ── Tab 1：技術分析 ────────────────────────────────────────────────────────
     with t1:
@@ -827,6 +827,246 @@ def main():
     # ── Tab 4：排行榜 ──────────────────────────────────────────────────────────
     with t4:
         render_ranking()
+
+    # ── Tab 5：ETF分析 ─────────────────────────────────────────────────────────
+    with t5:
+        render_etf_analysis(stock_id)
+
+
+def calc_etf_single_return(etf_id, buy_date, cost_price, shares):
+    """計算單檔ETF：資本利得 + 累積配息 的完整總報酬"""
+    result = {"ok": False}
+    try:
+        end_date = datetime.today().strftime("%Y-%m-%d")
+        buy_date_str = buy_date.strftime("%Y-%m-%d")
+        price_df = fetch_ohlcv(etf_id, buy_date_str, end_date)
+        if price_df.empty:
+            result["error"] = "查無此ETF代號的價格資料"
+            return result
+        rt = fetch_realtime_price(etf_id)
+        current_price = rt.get("price") if rt.get("ok") and rt.get("price") else price_df["Close"].iloc[-1]
+
+        div_df = fetch_etf_dividend(etf_id)
+        if not div_df.empty:
+            div_df = div_df[div_df["date"] >= pd.Timestamp(buy_date)]
+        cash_col = "CashEarningsDistribution" if (not div_df.empty and "CashEarningsDistribution" in div_df.columns) else None
+        total_dividend_per_share = div_df[cash_col].sum() if cash_col else 0
+        dividend_count = len(div_df) if cash_col else 0
+
+        cost_total      = cost_price * shares
+        market_value    = current_price * shares
+        capital_gain    = market_value - cost_total
+        capital_gain_pct= capital_gain / cost_total * 100 if cost_total else 0
+        dividend_total  = total_dividend_per_share * shares
+        dividend_pct    = dividend_total / cost_total * 100 if cost_total else 0
+        total_return     = capital_gain + dividend_total
+        total_return_pct = total_return / cost_total * 100 if cost_total else 0
+
+        holding_days = (datetime.today().date() - buy_date).days
+        holding_years = max(holding_days/365, 0.01)
+        annualized_pct = ((1 + total_return_pct/100) ** (1/holding_years) - 1) * 100
+
+        result.update({
+            "ok": True, "current_price": current_price, "cost_price": cost_price,
+            "shares": shares, "cost_total": cost_total, "market_value": market_value,
+            "capital_gain": capital_gain, "capital_gain_pct": capital_gain_pct,
+            "dividend_total": dividend_total, "dividend_pct": dividend_pct,
+            "dividend_count": dividend_count, "total_dividend_per_share": total_dividend_per_share,
+            "total_return": total_return, "total_return_pct": total_return_pct,
+            "annualized_pct": annualized_pct, "holding_days": holding_days,
+            "price_df": price_df, "div_df": div_df,
+        })
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def calc_etf_comparison_return(etf_ids, start_date, invest_amount):
+    """多檔ETF比較：假設同一天投入同樣金額，比較資本利得%與配息%"""
+    results = []
+    end_date = datetime.today().strftime("%Y-%m-%d")
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    for eid in etf_ids:
+        try:
+            price_df = fetch_ohlcv(eid, start_date_str, end_date)
+            if price_df.empty:
+                results.append({"etf_id": eid, "ok": False, "error": "查無價格資料"})
+                continue
+            start_price = price_df["Close"].iloc[0]
+            rt = fetch_realtime_price(eid)
+            current_price = rt.get("price") if rt.get("ok") and rt.get("price") else price_df["Close"].iloc[-1]
+            shares = invest_amount / start_price if start_price else 0
+
+            div_df = fetch_etf_dividend(eid)
+            if not div_df.empty:
+                div_df = div_df[div_df["date"] >= pd.Timestamp(start_date)]
+            cash_col = "CashEarningsDistribution" if (not div_df.empty and "CashEarningsDistribution" in div_df.columns) else None
+            div_per_share = div_df[cash_col].sum() if cash_col else 0
+
+            capital_gain_pct = (current_price - start_price) / start_price * 100 if start_price else 0
+            dividend_total   = div_per_share * shares
+            dividend_pct     = dividend_total / invest_amount * 100 if invest_amount else 0
+            total_pct        = capital_gain_pct + dividend_pct
+            name = fetch_stock_name(eid)
+
+            results.append({
+                "etf_id": eid, "ok": True, "name": name,
+                "start_price": start_price, "current_price": current_price,
+                "capital_gain_pct": capital_gain_pct, "dividend_pct": dividend_pct,
+                "total_pct": total_pct, "dividend_count": len(div_df) if cash_col else 0,
+            })
+        except Exception as e:
+            results.append({"etf_id": eid, "ok": False, "error": str(e)})
+    return results
+
+
+def draw_etf_comparison_chart(results):
+    ok_results = [r for r in results if r.get("ok")]
+    if not ok_results: return None
+    ok_results.sort(key=lambda r: r["total_pct"], reverse=True)
+    labels = [f"{r['name']}({r['etf_id']})" for r in ok_results]
+    cap    = [r["capital_gain_pct"] for r in ok_results]
+    div    = [r["dividend_pct"] for r in ok_results]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=labels, y=cap, name="價差報酬%",
+                         marker_color="#58a6ff", opacity=0.85))
+    fig.add_trace(go.Bar(x=labels, y=div, name="配息報酬%",
+                         marker_color="#3fb950", opacity=0.85))
+    fig.update_layout(**chart_layout(360), barmode="stack",
+        xaxis=dict(gridcolor="#21262d"),
+        yaxis=dict(gridcolor="#21262d", title="報酬率 %"))
+    fig.add_hline(y=0, line_dash="dash", line_color="#8b949e", line_width=0.8)
+    return fig
+
+
+def draw_etf_value_chart(price_df, cost_price, shares):
+    """畫出持有市值隨時間變化，跟成本線比較"""
+    fig = go.Figure()
+    market_val = price_df["Close"] * shares
+    cost_val   = cost_price * shares
+    fig.add_trace(go.Scatter(x=price_df["date"], y=market_val, mode="lines",
+        line=dict(color="#58a6ff", width=2), name="市值", fill="tozeroy",
+        fillcolor="rgba(88,166,255,0.08)"))
+    fig.add_hline(y=cost_val, line_dash="dash", line_color="#e3b341",
+                 annotation_text=f"成本 {cost_val:,.0f}", annotation_font_color="#e3b341")
+    fig.update_layout(**chart_layout(280),
+        xaxis=dict(gridcolor="#21262d"),
+        yaxis=dict(gridcolor="#21262d", title="市值(元)"))
+    return fig
+
+
+def render_etf_analysis(default_etf_id):
+    et1, et2 = st.tabs(["📍 單檔分析", "🔀 多檔比較"])
+
+    # ── 單檔深入分析 ──────────────────────────────────────────────────────────
+    with et1:
+        st.markdown("<div class='section-hdr'>輸入你的實際持有資訊，計算真實總報酬（價差＋配息）</div>",unsafe_allow_html=True)
+        sc1,sc2,sc3 = st.columns(3)
+        with sc1:
+            etf_id_input = st.text_input("ETF代號", value=default_etf_id if default_etf_id else "00878", key="etf_single_id")
+        with sc2:
+            cost_price = st.number_input("每股成本(元)", min_value=0.0, value=20.0, step=0.01, key="etf_cost")
+        with sc3:
+            shares = st.number_input("持有股數", min_value=0, value=1000, step=100, key="etf_shares")
+        buy_date = st.date_input("買入日期", value=datetime.today()-timedelta(days=365),
+                                 max_value=datetime.today(), key="etf_buy_date")
+
+        if st.button("📊 計算總報酬", key="calc_etf_single"):
+            with st.spinner("計算中..."):
+                r = calc_etf_single_return(etf_id_input.strip(), buy_date, cost_price, shares)
+            if not r.get("ok"):
+                st.markdown(f"<div class='error-box'>⚠️ {r.get('error','資料取得失敗，請確認代號是否正確')}</div>",unsafe_allow_html=True)
+            else:
+                name = fetch_stock_name(etf_id_input.strip())
+                st.markdown(f"### {name} ({etf_id_input.strip()})")
+
+                rc1,rc2,rc3,rc4 = st.columns(4)
+                rc1.markdown(metric_card("總投入成本", f"{r['cost_total']:,.0f} 元", f"{r['shares']:.0f}股 × {r['cost_price']:.2f}"),unsafe_allow_html=True)
+                rc2.markdown(metric_card("目前市值", f"{r['market_value']:,.0f} 元", f"現價 {r['current_price']:.2f}"),unsafe_allow_html=True)
+                gain_cls = "up" if r['capital_gain']>=0 else "down"
+                rc3.markdown(metric_card("資本利得(價差)", f"{r['capital_gain']:+,.0f} 元",
+                    f"{r['capital_gain_pct']:+.2f}%", gain_cls),unsafe_allow_html=True)
+                rc4.markdown(metric_card("累積配息", f"{r['dividend_total']:+,.0f} 元",
+                    f"{r['dividend_pct']:.2f}%｜配息{r['dividend_count']}次", "up"),unsafe_allow_html=True)
+
+                total_cls = "up" if r['total_return']>=0 else "down"
+                verdict_css = "verdict-bull" if r['total_return_pct']>=0 else "verdict-bear"
+                holding_label = f"{r['holding_days']}天（約{r['holding_days']/365:.1f}年）"
+                st.markdown(f"""<div class='verdict-box {verdict_css}' style='margin-top:14px;'>
+                    💰 總報酬：{r['total_return']:+,.0f} 元（{r['total_return_pct']:+.2f}%）
+                    ｜年化報酬率約 {r['annualized_pct']:+.2f}%　｜持有 {holding_label}</div>""",
+                    unsafe_allow_html=True)
+
+                # 報酬拆解說明
+                if r['capital_gain'] < 0 and r['dividend_total'] > abs(r['capital_gain']):
+                    st.markdown("<div class='warn-box'>📌 股價是虧損的，但配息把虧損補回來了——這就是「賺股息賠價差」的典型情況，總報酬仍為正。</div>",unsafe_allow_html=True)
+                elif r['capital_gain'] < 0 and r['total_return'] < 0:
+                    st.markdown("<div class='error-box'>📌 股價虧損且配息不足以打平，目前總報酬為負，屬於「賺股息賠價差」的虧損情境。</div>",unsafe_allow_html=True)
+                elif r['capital_gain'] > 0:
+                    st.markdown("<div class='warn-box' style='color:#3fb950;border-color:#2d6a4f;background:#1a4731;'>📌 股價上漲加上配息，價差跟配息都有正貢獻。</div>",unsafe_allow_html=True)
+
+                st.markdown("<div class='section-hdr' style='margin-top:20px;'>持有期間市值變化</div>",unsafe_allow_html=True)
+                st.plotly_chart(draw_etf_value_chart(r["price_df"], r["cost_price"], r["shares"]),
+                                use_container_width=True, config={"displayModeBar":False})
+
+                if not r["div_df"].empty:
+                    with st.expander("📋 配息明細", expanded=False):
+                        cash_col = "CashEarningsDistribution"
+                        disp = r["div_df"][["date",cash_col]].copy()
+                        disp.columns = ["除息日","每股配息(元)"]
+                        disp["持股配息(元)"] = (disp["每股配息(元)"] * shares).round(0)
+                        st.dataframe(disp.iloc[::-1].reset_index(drop=True), use_container_width=True, height=250)
+
+    # ── 多檔比較 ──────────────────────────────────────────────────────────────
+    with et2:
+        st.markdown("<div class='section-hdr'>假設同一天投入相同金額，比較不同ETF的「價差報酬」vs「配息報酬」</div>",unsafe_allow_html=True)
+        mc1,mc2 = st.columns(2)
+        with mc1:
+            compare_etfs = st.text_input("ETF代號（逗號分隔，最多6檔）",
+                value="00878, 00929, 00919, 00713", key="etf_compare_ids")
+        with mc2:
+            invest_amount = st.number_input("假設投入金額(元/檔)", min_value=1000, value=100000, step=10000, key="etf_invest_amt")
+        compare_start = st.date_input("假設投入日期", value=datetime.today()-timedelta(days=365),
+                                      max_value=datetime.today(), key="etf_compare_date")
+
+        if st.button("🔀 開始比較", key="run_etf_compare"):
+            ids = [x.strip() for x in compare_etfs.replace("，",",").split(",") if x.strip()][:6]
+            if len(ids) < 2:
+                st.markdown("<div class='warn-box'>請至少輸入2檔ETF代號</div>",unsafe_allow_html=True)
+            else:
+                with st.spinner("計算各檔ETF報酬中..."):
+                    results = calc_etf_comparison_return(ids, compare_start, invest_amount)
+
+                ok_results = [r for r in results if r.get("ok")]
+                fail_results = [r for r in results if not r.get("ok")]
+
+                if ok_results:
+                    chart = draw_etf_comparison_chart(results)
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True, config={"displayModeBar":False})
+                    st.caption(f"假設 {compare_start.strftime('%Y-%m-%d')} 投入 {invest_amount:,} 元，統計至今的累積報酬拆解")
+
+                    st.markdown("<div class='section-hdr' style='margin-top:10px;'>詳細數據</div>",unsafe_allow_html=True)
+                    sorted_results = sorted(ok_results, key=lambda r: r["total_pct"], reverse=True)
+                    hdr = st.columns([0.5,2,1.2,1.2,1.2,1.2])
+                    for col,txt in zip(hdr,["#","ETF","價差%","配息%","配息次數","總報酬%"]):
+                        col.markdown(f"<div style='font-size:11px;color:#8b949e;font-weight:600;'>{txt}</div>",unsafe_allow_html=True)
+                    st.markdown("<hr style='border-color:#30363d;margin:4px 0 10px 0;'>",unsafe_allow_html=True)
+                    for rank,r in enumerate(sorted_results,1):
+                        row = st.columns([0.5,2,1.2,1.2,1.2,1.2])
+                        row[0].markdown(f"<b>#{rank}</b>",unsafe_allow_html=True)
+                        row[1].markdown(f"{r['name']} ({r['etf_id']})",unsafe_allow_html=True)
+                        cap_clr = "#3fb950" if r['capital_gain_pct']>=0 else "#f85149"
+                        row[2].markdown(f"<span style='color:{cap_clr};'>{r['capital_gain_pct']:+.2f}%</span>",unsafe_allow_html=True)
+                        row[3].markdown(f"<span style='color:#3fb950;'>{r['dividend_pct']:+.2f}%</span>",unsafe_allow_html=True)
+                        row[4].markdown(f"{r['dividend_count']}次",unsafe_allow_html=True)
+                        tot_clr = "#3fb950" if r['total_pct']>=0 else "#f85149"
+                        row[5].markdown(f"<b style='color:{tot_clr};'>{r['total_pct']:+.2f}%</b>",unsafe_allow_html=True)
+
+                if fail_results:
+                    fail_ids = ", ".join(r["etf_id"] for r in fail_results)
+                    st.markdown(f"<div class='warn-box' style='margin-top:10px;'>⚠️ 以下代號查詢失敗，請確認是否正確：{fail_ids}</div>",unsafe_allow_html=True)
 
 
 def render_ranking():

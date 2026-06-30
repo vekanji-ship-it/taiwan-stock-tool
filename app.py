@@ -635,13 +635,20 @@ def main():
         ma_opts     = st.multiselect("均線顯示", ["MA5","MA10","MA20","MA60"],
                                      default=["MA5","MA20","MA60"])
         show_bb     = st.toggle("布林通道", value=True)
-        run         = st.button("🔍 開始分析")
+        if st.button("🔍 開始分析"):
+            if stock_input.strip():
+                st.session_state["analyzed"] = True
+                st.session_state["active_stock_id"] = stock_input.strip()
+            else:
+                st.session_state["analyzed"] = False
         st.markdown("---")
         st.markdown("""<div style='font-size:11px;color:#8b949e;line-height:1.8'>
         <b>資料來源</b><br>K線 · 籌碼 · 基本面：FinMind<br>即時報價：TWSE OpenAPI<br>
         <b>快取</b><br>歷史/基本面：1hr｜即時：5min｜股名：24hr</div>""",unsafe_allow_html=True)
 
-    if not run or not stock_input.strip():
+    analyzed = st.session_state.get("analyzed", False)
+
+    if not analyzed:
         st.markdown("""<div style='display:flex;flex-direction:column;align-items:center;
             justify-content:center;height:65vh;gap:16px;'>
             <div style='font-size:52px;'>📊</div>
@@ -657,6 +664,8 @@ def main():
         with tab_rank:
             render_ranking()
         return
+
+    stock_input = st.session_state.get("active_stock_id", stock_input)
 
     stock_id   = stock_input.strip()
     end_date   = datetime.today().strftime("%Y-%m-%d")

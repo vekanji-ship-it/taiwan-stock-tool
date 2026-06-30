@@ -574,10 +574,11 @@ def draw_fundamental_charts(per_df, rev_df, eps_df):
         if "YoY" in rev_df.columns:
             fig.add_trace(go.Scatter(x=rev_df["date"],y=rev_df["YoY"],mode="lines+markers",
                 name="年增率%",line=dict(color="#ffa657",width=2),yaxis="y2"))
-        fig.update_layout(**chart_layout(260),
+        layout = chart_layout(260)
+        layout["legend"] = dict(x=0.01, y=0.99, bgcolor="#161b22", bordercolor="#30363d", borderwidth=1)
+        fig.update_layout(**layout,
             yaxis=dict(title="億元",gridcolor="#21262d"),
-            yaxis2=dict(title="年增率%",overlaying="y",side="right",gridcolor="#21262d"),
-            legend=dict(x=0.01,y=0.99))
+            yaxis2=dict(title="年增率%",overlaying="y",side="right",gridcolor="#21262d"))
         charts.append(fig)
     return charts
 

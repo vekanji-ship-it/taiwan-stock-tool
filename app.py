@@ -169,8 +169,8 @@ def fetch_fundamental(stock_id, start_date):
 
 @st.cache_data(ttl=3600)
 def fetch_monthly_revenue(stock_id):
-    """抓月營收（近12個月）"""
-    start = (datetime.today() - timedelta(days=400)).strftime("%Y-%m-%d")
+    """抓月營收（近13個月），自行計算年增率"""
+    start = (datetime.today() - timedelta(days=760)).strftime("%Y-%m-%d")  # 抓兩年份才能算YoY
     try:
         r = requests.get(FINMIND_BASE, params={
             "dataset":"TaiwanStockMonthRevenue","data_id":stock_id,
@@ -180,9 +180,12 @@ def fetch_monthly_revenue(stock_id):
         if data.get("status") != 200 or not data.get("data"): return pd.DataFrame()
         df = pd.DataFrame(data["data"])
         df["date"] = pd.to_datetime(df["date"])
-        df["revenue"] = pd.to_numeric(df.get("revenue", df.get("Revenue",0)), errors="coerce")
-        df["YoY"] = pd.to_numeric(df.get("year_of_year", df.get("revenue_year",None)), errors="coerce")
-        return df.sort_values("date").tail(13)
+        df["revenue"] = pd.to_numeric(df.get("revenue", 0), errors="coerce")
+        df = df.sort_values("date").reset_index(drop=True)
+        # 自行計算年增率：本月營收 vs 去年同月營收
+        df["YoY"] = (df["revenue"] / df["revenue"].shift(12) - 1) * 100
+        df["YoY"] = df["YoY"].round(1)
+        return df.tail(13)
     except Exception:
         return pd.DataFrame()
 

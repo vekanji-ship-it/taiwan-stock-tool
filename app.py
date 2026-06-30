@@ -187,29 +187,63 @@ def fetch_institutional(stock_id: str, start_date: str, end_date: str) -> pd.Dat
 
 @st.cache_data(ttl=300)
 def fetch_realtime_price(stock_id: str) -> dict:
-    """從 TWSE 抓即時報價（快取 5 分鐘）"""
+    """從 TWSE 抓即時報價，自動判斷上市(tse)/上櫃(otc)（快取 5 分鐘）"""
+    headers = {"Referer": "https://mis.twse.com.tw"}
+    for market in ["tse", "otc"]:
+        try:
+            params = {"ex_ch": f"{market}_{stock_id}.tw", "json": 1, "delay": 0}
+            r = requests.get(TWSE_BASE, params=params, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("rtmessage") == "OK" and data.get("msgArray"):
+                item = data["msgArray"][0]
+                name = item.get("n", "").strip()
+                if name:  # 有拿到名字才算成功
+                    return {
+                        "name":   name,
+                        "price":  float(item.get("z", 0) or 0),
+                        "open":   float(item.get("o", 0) or 0),
+                        "high":   float(item.get("h", 0) or 0),
+                        "low":    float(item.get("l", 0) or 0),
+                        "prev":   float(item.get("y", 0) or 0),
+                        "volume": int(item.get("v", 0) or 0),
+                        "time":   item.get("t", ""),
+                        "market": market,
+                        "ok":     True
+                    }
+        except Exception:
+            pass
+    return {"ok": False}
+
+
+@st.cache_data(ttl=86400)
+def fetch_stock_name_official(stock_id: str) -> str:
+    """從 TWSE/TPEx 官方公司清單查股票名稱（快取 24 小時）"""
+    # 先查上市（TWSE）
     try:
-        params = {"ex_ch": f"tse_{stock_id}.tw", "json": 1, "delay": 0}
-        headers = {"Referer": "https://mis.twse.com.tw"}
-        r = requests.get(TWSE_BASE, params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("rtmessage") == "OK" and data.get("msgArray"):
-            item = data["msgArray"][0]
-            return {
-                "name":   item.get("n", stock_id),
-                "price":  float(item.get("z", 0) or 0),
-                "open":   float(item.get("o", 0) or 0),
-                "high":   float(item.get("h", 0) or 0),
-                "low":    float(item.get("l", 0) or 0),
-                "prev":   float(item.get("y", 0) or 0),
-                "volume": int(item.get("v", 0) or 0),
-                "time":   item.get("t", ""),
-                "ok":     True
-            }
+        r = requests.get(
+            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+            timeout=10
+        )
+        if r.status_code == 200:
+            for item in r.json():
+                if str(item.get("公司代號", "")).strip() == str(stock_id):
+                    return item.get("公司簡稱", stock_id).strip()
     except Exception:
         pass
-    return {"ok": False}
+    # 再查上櫃（TPEx）
+    try:
+        r = requests.get(
+            "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O",
+            timeout=10
+        )
+        if r.status_code == 200:
+            for item in r.json():
+                if str(item.get("SecuritiesCompanyCode", "")).strip() == str(stock_id):
+                    return item.get("CompanyAbbreviation", stock_id).strip()
+    except Exception:
+        pass
+    return stock_id
 
 # ─── 技術指標計算 ────────────────────────────────────────────────────────────
 
@@ -574,7 +608,7 @@ def main():
     
     # ── 股名與即時報價 ──
     rt_name    = rt.get("name", "") if rt.get("ok") else ""
-    stock_name = rt_name if (rt_name and rt_name != stock_id) else fetch_stock_name(stock_id)
+    stock_name = rt_name if (rt_name and rt_name != stock_id) else fetch_stock_name_official(stock_id)
     last_close = df["Close"].iloc[-1]
     prev_close = df["Close"].iloc[-2] if len(df) > 1 else last_close
     chg        = last_close - prev_close
